@@ -1,19 +1,8 @@
 @everywhere begin
     using DaggerWebDash
     using Dagger
-    # Algorithms
-    function mock_Gaudi_algorithm(id, data...)
-        println("Gaudi algorithm for vertex $id !")
-        sleep(1)
-        # println("Previous vertices: $data")
-        
-        return id
-    end
-
-    function dataobject_algorithm(id, data...)
-        sleep(0.1)
-        return "dataobject"
-    end
+    using MetaGraphs
+    using Graphs
 
     function notify_graph_finalization(notifications::RemoteChannel, graph_id::Int, final_vertices_promises)
         # println("Entered notify $graph_id")
@@ -29,6 +18,37 @@
     end
 end
 
+# Algorithms
+function get_transform(graph::MetaDiGraph, vertex_id::Int)
+    type = get_prop(graph, vertex_id, :type)
+
+    # for now just maintain task dependencies at data objects
+    if type == "DataObject"
+        return (data...) -> data[1]
+    end
+
+    f = AVAILABLE_TRANSFORMS[type](graph, vertex_id)
+
+    return (data...) -> Dagger.@spawn f(data...)
+end
+
+function _algorithm(graph::MetaDiGraph, vertex_id::Int)
+    runtime = get_prop(graph, vertex_id, :runtime_average_s)
+
+    function algorithm(data...)
+        println("Gaudi algorithm for vertex $vertex_id !")
+
+        sleep(runtime * 1e4)
+
+        return "$vertex_id"
+    end
+
+    return algorithm
+end
+
+AVAILABLE_TRANSFORMS = Dict{String, Function}(
+    "Algorithm" => _algorithm,
+)
 
 function parse_graphs(graphs_map::Dict, output_graph_path::String, output_graph_image_path::String)
     graphs = []
@@ -86,14 +106,14 @@ function get_oute_map(G)
     for edge in Graphs.edges(G)
         src_vertex = src(edge)
         dest_vertex = dst(edge)
-        
+
         if haskey(outgoing_edges_destinations_map, src_vertex)
             push!(outgoing_edges_destinations_map[src_vertex], dest_vertex)
         else
             outgoing_edges_destinations_map[src_vertex] = [dest_vertex]
         end
     end
-    
+
     return outgoing_edges_destinations_map
 end
 
@@ -118,22 +138,21 @@ end
 function schedule_graph(G::MetaDiGraph)
     inc_e_src_map = get_ine_map(G)
 
-    for vertex_id in MetaGraphs.topological_sort(G)
+    for vertex_id in MetaGraphs.topological_sort(G) 
         incoming_data = get_deps_promises(vertex_id, inc_e_src_map, G)
-        set_prop!(G, vertex_id, :res_data, Dagger.@spawn AVAILABLE_TRANSFORMS[get_prop(G, vertex_id, :type)](vertex_id, incoming_data...))
+        transform = get_transform(G, vertex_id)
+        result = transform(incoming_data...)
+
+        set_prop!(G, vertex_id, :res_data, result)
     end
 end
 
 function schedule_graph_with_notify(G::MetaDiGraph, notifications::RemoteChannel, graph_id::Int)
+    schedule_graph(G)
+
     final_vertices = []
-    inc_e_src_map = get_ine_map(G)
-
-    for vertex_id in MetaGraphs.topological_sort(G)
-        incoming_data = get_deps_promises(vertex_id, inc_e_src_map, G)
-        set_prop!(G, vertex_id, :res_data, Dagger.@spawn AVAILABLE_TRANSFORMS[get_prop(G, vertex_id, :type)](vertex_id, incoming_data...))
-    end
-
     out_e_src_map = get_oute_map(G)
+
     for vertex_id in MetaGraphs.vertices(G)
         if !haskey(out_e_src_map, vertex_id)
             out_e_src_map[vertex_id] = []
@@ -141,7 +160,7 @@ function schedule_graph_with_notify(G::MetaDiGraph, notifications::RemoteChannel
     end
 
     for vertex_id in keys(out_e_src_map)
-        if out_e_src_map[vertex_id] == [] # TODO: a native method to check for emptiness should exist
+        if isempty(out_e_src_map[vertex_id])
             push!(final_vertices, vertex_id)
         end
     end
@@ -156,6 +175,3 @@ function flush_logs_to_file()
         Dagger.show_plan(io, logs) # Writes graph to a file
     end
 end
-
-
-AVAILABLE_TRANSFORMS = Dict{String, Function}("GaudiAlgorithm" => mock_Gaudi_algorithm, "DataObject" => dataobject_algorithm)
